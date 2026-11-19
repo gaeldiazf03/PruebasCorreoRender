@@ -178,6 +178,38 @@ button:hover {
   color: #a8322b;
 }
 
+.send-status {
+  margin: 0 auto 22px;
+  padding: 18px 22px;
+  border: 1px solid #dce4f8;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgb(34 53 89 / 5%);
+}
+
+.send-status h2 {
+  margin-bottom: 10px;
+  font-size: 1rem;
+}
+
+.send-status ol {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 22px;
+  color: #52617b;
+  font-size: 0.9rem;
+}
+
+.send-status li[data-type="error"] {
+  color: #a8322b;
+}
+
+.send-status li[data-type="complete"] {
+  color: #17653a;
+  font-weight: 650;
+}
+
 footer {
   margin-top: 24px;
   color: #7d8799;

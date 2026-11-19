@@ -24,6 +24,11 @@
       {% endif %}
     {% endwith %}
 
+    <section class="send-status" data-send-status hidden aria-labelledby="send-status-title">
+      <h2 id="send-status-title">Estado del envío</h2>
+      <ol data-send-status-log role="log" aria-live="polite" aria-relevant="additions"></ol>
+    </section>
+
     <div class="modules">
       <section class="card" id="manual">
         <div class="card-heading">
@@ -79,5 +84,6 @@
     </div>
     <footer>La entrega de correos requiere una configuración SMTP válida.</footer>
   </main>
+  <script src="{{ url_for('static', filename='send-status.js') }}" defer></script>
 </body>
 </html>
