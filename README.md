@@ -14,29 +14,27 @@ pip install -r requirements.txt
 cp .env.example .env
 # Genera una clave y asígnala a SECRET_KEY en .env:
 python -c "import secrets; print(secrets.token_hex(32))"
+# Completa el resto de .env con los datos de Resend (ver abajo).
 python app.py
 ```
 
-La aplicación estará disponible en <http://localhost:5000>. Por defecto, SMTP apunta a `localhost:1025`, útil para probar con un servidor local de correo de desarrollo como Mailpit. Si no hay un servidor SMTP disponible, el formulario mostrará un error y la aplicación registrará el detalle en la consola.
+La aplicación estará disponible en <http://localhost:5000>.
 
-Al enviar un correo, la página muestra el progreso real de conexión, autenticación y envío al servidor SMTP. El estado de éxito significa que el servidor SMTP aceptó el mensaje; no confirma que haya llegado a la bandeja de entrada ni que se haya leído.
+Ambos módulos envían a la API de Resend mediante HTTPS (puerto 443), sin usar SMTP. La página muestra la preparación, el envío y el resultado de la solicitud. Que Resend acepte el mensaje no confirma su entrega.
 
-## Configuración SMTP
+## Configuración de Resend
 
-La aplicación carga la configuración del archivo `.env` al iniciar. Completa allí las credenciales SMTP y el destinatario del formulario; `SECRET_KEY` es obligatoria. El archivo `.env` está excluido de Git. En producción (por ejemplo Render), configura estas variables en el servicio:
+Verifica tu [dominio remitente en Resend](https://resend.com/docs/dashboard/domains/introduction) y crea una [clave de API](https://resend.com/api-keys) con permiso de envío. Configura estas variables en `.env` para desarrollo o en el servicio para producción:
 
-| Variable | Descripción | Valor predeterminado |
-| --- | --- | --- |
-| `SECRET_KEY` | Clave secreta de sesión de Flask. | Obligatoria |
-| `MAIL_SERVER` | Host SMTP. | `localhost` |
-| `MAIL_PORT` | Puerto SMTP. | `1025` |
-| `MAIL_USE_TLS` | Usa STARTTLS (`true`/`false`). | `false` |
-| `MAIL_USE_SSL` | Usa SSL/TLS directo (`true`/`false`). No se combina con STARTTLS. | `false` |
-| `MAIL_USERNAME` | Usuario SMTP; también se usa como remitente si no se define `MAIL_DEFAULT_SENDER`. | Vacío |
-| `MAIL_PASSWORD` | Contraseña SMTP. | Vacío |
-| `MAIL_DEFAULT_SENDER` | Dirección remitente. | Vacío |
-| `MAIL_FORM_RECIPIENT` | Dirección que recibe los envíos del formulario de contacto. | Vacío |
-| `PORT` | Puerto HTTP de la aplicación. | `5000` |
+| Variable | Descripción |
+| --- | --- |
+| `SECRET_KEY` | Clave secreta de sesión de Flask. Obligatoria para iniciar. |
+| `RESEND_API_KEY` | Clave privada de Resend con permiso de envío. |
+| `MAIL_DEFAULT_SENDER` | Remitente de un dominio verificado, por ejemplo `Web <hola@tudominio.com>`. |
+| `MAIL_FORM_RECIPIENT` | Dirección que recibe los envíos del formulario de contacto. El correo del visitante se usa en `Reply-To`, no como remitente. |
+| `PORT` | Puerto HTTP local de la aplicación; por defecto, `5000`. |
+
+Para una prueba sin dominio verificado, usa `onboarding@resend.dev` como remitente y la dirección de tu cuenta de Resend como destinatario en cualquiera de los dos módulos. No compartas la clave ni subas `.env` al repositorio.
 
 ### Desplegar en Render
 
@@ -50,14 +48,16 @@ No necesitas crear un archivo `wsgi.py`: `app.py` ya expone la aplicación Flask
    | **Build Command** | `pip install -r requirements.txt` |
    | **Start Command** | `gunicorn app:app` |
 
-3. En **Environment Variables** del servicio, agrega `SECRET_KEY`, `MAIL_SERVER`, `MAIL_PORT`, `MAIL_USE_TLS`, `MAIL_USE_SSL`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_DEFAULT_SENDER` y `MAIL_FORM_RECIPIENT` con los valores de tu proveedor SMTP. Genera un valor secreto nuevo para `SECRET_KEY`; no copies credenciales al repositorio.
+3. En **Environment Variables**, guarda `RESEND_API_KEY` y configura `MAIL_DEFAULT_SENDER` con el remitente autorizado por Resend. Mantén `SECRET_KEY` y `MAIL_FORM_RECIPIENT`. Las variables SMTP anteriores ya no se usan y se pueden quitar.
 
 Render volverá a desplegar cuando subas cambios a la rama conectada. Revisa los logs del servicio si el build o el arranque fallan. No uses `python app.py` como servidor de producción.
+
+Si el sitio es público, restringe el acceso al módulo de correo personalizado antes de desplegar: permite elegir cualquier destinatario y puede consumir tu cuota de Resend.
 
 ## Pruebas
 
 ```bash
-python -m unittest
+SECRET_KEY=pruebas-locales python -m unittest
 ```
 
-Las pruebas validan los dos flujos sin conectarse a un servidor SMTP real.
+Las pruebas validan los dos flujos sin contactar a Resend ni enviar correos reales.

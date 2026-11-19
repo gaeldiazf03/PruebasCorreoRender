@@ -1,11 +1,10 @@
-import logging
 import json
 import os
 import queue
-import smtplib
 import threading
-from email.message import EmailMessage
+from contextlib import closing
 from email.utils import parseaddr
+from http.client import HTTPException, HTTPSConnection
 
 from dotenv import load_dotenv
 from flask import Flask, Response, current_app, flash, redirect, render_template, request, url_for
@@ -14,16 +13,18 @@ from flask import Flask, Response, current_app, flash, redirect, render_template
 load_dotenv()
 
 
+SEND_ERROR_MESSAGE = "No se pudo enviar el correo. Revisa la configuración y los registros del servicio."
+
+
+class ResendError(Exception):
+    pass
+
+
 def create_app(test_config=None):
     app = Flask(__name__)
     app.config.from_mapping(
         SECRET_KEY=os.getenv("SECRET_KEY"),
-        MAIL_SERVER=os.getenv("MAIL_SERVER", "localhost"),
-        MAIL_PORT=int(os.getenv("MAIL_PORT", "1025")),
-        MAIL_USE_TLS=os.getenv("MAIL_USE_TLS", "false").lower() in {"1", "true", "yes"},
-        MAIL_USE_SSL=os.getenv("MAIL_USE_SSL", "false").lower() in {"1", "true", "yes"},
-        MAIL_USERNAME=os.getenv("MAIL_USERNAME", ""),
-        MAIL_PASSWORD=os.getenv("MAIL_PASSWORD", ""),
+        RESEND_API_KEY=os.getenv("RESEND_API_KEY", ""),
         MAIL_DEFAULT_SENDER=os.getenv("MAIL_DEFAULT_SENDER", ""),
         MAIL_FORM_RECIPIENT=os.getenv("MAIL_FORM_RECIPIENT", ""),
     )
@@ -55,7 +56,7 @@ def create_app(test_config=None):
             recipient,
             subject,
             body,
-            "Correo enviado correctamente.",
+            "Resend aceptó el correo para envío.",
             "manual",
         )
 
@@ -98,7 +99,7 @@ def create_app(test_config=None):
             recipient,
             "Nuevo mensaje desde el formulario web",
             body,
-            "Formulario enviado correctamente.",
+            "Resend aceptó el mensaje del formulario para envío.",
             "contact",
             reply_to=email,
         )
@@ -115,56 +116,42 @@ def _is_valid_email(value):
 
 def send_email(recipient, subject, body, reply_to=None, on_progress=None):
     _report_progress(on_progress, "preparing", "Preparando el mensaje.")
-    sender = current_app.config["MAIL_DEFAULT_SENDER"] or current_app.config["MAIL_USERNAME"]
+    api_key = current_app.config["RESEND_API_KEY"].strip()
+    sender = current_app.config["MAIL_DEFAULT_SENDER"].strip()
+    if not api_key:
+        raise ResendError("Configura RESEND_API_KEY.")
     if not sender:
-        raise ValueError("Configura MAIL_DEFAULT_SENDER o MAIL_USERNAME.")
-    if current_app.config["MAIL_USE_TLS"] and current_app.config["MAIL_USE_SSL"]:
-        raise ValueError("MAIL_USE_TLS y MAIL_USE_SSL no pueden estar habilitados al mismo tiempo.")
+        raise ResendError("Configura MAIL_DEFAULT_SENDER.")
 
-    message = EmailMessage()
-    message["From"] = sender
-    message["To"] = recipient
-    message["Subject"] = subject
+    message = {"from": sender, "to": [recipient], "subject": subject, "text": body}
     if reply_to:
-        message["Reply-To"] = reply_to
-    message.set_content(body)
+        message["reply_to"] = reply_to
 
-    server = current_app.config["MAIL_SERVER"]
-    port = current_app.config["MAIL_PORT"]
-    timeout = 10
-    if current_app.config["MAIL_USE_SSL"]:
-        _report_progress(on_progress, "connecting", f"Conectando de forma segura a {server}:{port}.")
-        with smtplib.SMTP_SSL(server, port, timeout=timeout) as smtp:
-            _report_progress(on_progress, "connected", "Conexión segura establecida.")
-            _authenticate(smtp, on_progress)
-            _report_progress(on_progress, "sending", "Enviando el mensaje al servidor SMTP.")
-            smtp.send_message(message)
-    else:
-        _report_progress(on_progress, "connecting", f"Conectando al servidor SMTP {server}:{port}.")
-        with smtplib.SMTP(server, port, timeout=timeout) as smtp:
-            _report_progress(on_progress, "connected", "Conexión con el servidor SMTP establecida.")
-            if current_app.config["MAIL_USE_TLS"]:
-                _report_progress(on_progress, "securing", "Negociando una conexión cifrada.")
-                smtp.starttls()
-            _authenticate(smtp, on_progress)
-            _report_progress(on_progress, "sending", "Enviando el mensaje al servidor SMTP.")
-            smtp.send_message(message)
+    _report_progress(on_progress, "sending", "Enviando el mensaje a Resend por HTTPS.")
+    try:
+        with closing(HTTPSConnection("api.resend.com", timeout=10)) as connection:
+            connection.request(
+                "POST",
+                "/emails",
+                body=json.dumps(message).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "PruebasCorreoRender/1.0",
+                },
+            )
+            with connection.getresponse() as response:
+                status = response.status
+    except (OSError, HTTPException, ValueError) as error:
+        raise ResendError(f"Falló la comunicación con Resend ({type(error).__name__}).") from None
+    if not 200 <= status < 300:
+        raise ResendError(f"Resend rechazó la solicitud (HTTP {status}).")
+
     _report_progress(
         on_progress,
         "accepted",
-        "El servidor SMTP aceptó el mensaje; esto no confirma su entrega en la bandeja del destinatario.",
+        "Resend aceptó el mensaje; esto no confirma su entrega en la bandeja del destinatario.",
     )
-
-
-def _authenticate(smtp, on_progress=None):
-    username = current_app.config["MAIL_USERNAME"]
-    password = current_app.config["MAIL_PASSWORD"]
-    if username:
-        _report_progress(on_progress, "authenticating", "Autenticando con el servidor SMTP.")
-        smtp.login(username, password)
-        _report_progress(on_progress, "authenticated", "Autenticación correcta.")
-    else:
-        _report_progress(on_progress, "authentication_skipped", "No se configuró usuario SMTP; se omitió la autenticación.")
 
 
 def _report_progress(callback, status, message):
@@ -200,19 +187,19 @@ def _send_with_progress(recipient, subject, body, anchor, reply_to=None):
         with app.app_context():
             try:
                 send_email(recipient, subject, body, reply_to=reply_to, on_progress=report)
-            except (smtplib.SMTPException, OSError, ValueError):
-                current_app.logger.exception("No se pudo enviar el correo.")
+            except ResendError as error:
+                current_app.logger.error("No se pudo enviar el correo: %s", error)
                 events.put(
                     {
                         "type": "error",
-                        "message": "No se pudo completar el envío. Verifica la configuración SMTP.",
+                        "message": SEND_ERROR_MESSAGE,
                     }
                 )
             else:
                 events.put(
                     {
                         "type": "complete",
-                        "message": f"Proceso terminado. El servidor aceptó el correo dirigido a {recipient}.",
+                        "message": f"Proceso terminado. Resend aceptó el correo dirigido a {recipient}.",
                         "anchor": anchor,
                     }
                 )
@@ -237,9 +224,9 @@ def _send_with_progress(recipient, subject, body, anchor, reply_to=None):
 def _send_and_redirect(recipient, subject, body, success_message, anchor, reply_to=None):
     try:
         send_email(recipient, subject, body, reply_to=reply_to)
-    except (smtplib.SMTPException, OSError, ValueError):
-        current_app.logger.exception("No se pudo enviar el correo.")
-        flash("No se pudo enviar el correo. Verifica la configuración SMTP.", "error")
+    except ResendError as error:
+        current_app.logger.error("No se pudo enviar el correo: %s", error)
+        flash(SEND_ERROR_MESSAGE, "error")
     else:
         flash(success_message, "success")
     return redirect(url_for("index", _anchor=anchor))

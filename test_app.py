@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import patch
 
@@ -10,6 +11,7 @@ class EmailFormTests(unittest.TestCase):
             {
                 "TESTING": True,
                 "SECRET_KEY": "test-key",
+                "RESEND_API_KEY": "test-api-key",
                 "MAIL_FORM_RECIPIENT": "inbox@example.com",
                 "MAIL_DEFAULT_SENDER": "website@example.com",
             }
@@ -39,14 +41,10 @@ class EmailFormTests(unittest.TestCase):
             "person@example.com", "Prueba", "Contenido del correo", reply_to=None
         )
 
-    @patch("app.send_email")
-    def test_manual_email_reports_live_progress(self, send_email):
-        def send_with_progress(recipient, subject, body, reply_to=None, on_progress=None):
-            on_progress("connecting", "Conectando al servidor SMTP.")
-            on_progress("sending", "Enviando el mensaje.")
-            on_progress("accepted", "El servidor SMTP aceptó el mensaje.")
-
-        send_email.side_effect = send_with_progress
+    @patch("app.HTTPSConnection")
+    def test_manual_email_reports_live_progress(self, https_connection):
+        connection = https_connection.return_value
+        connection.getresponse.return_value.__enter__.return_value.status = 200
         response = self.client.post(
             "/send-email",
             data={
@@ -58,9 +56,24 @@ class EmailFormTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Conectando al servidor SMTP.", response.data)
-        self.assertIn(b"Enviando el mensaje.", response.data)
-        self.assertIn(b"El servidor SMTP acept\xc3\xb3 el mensaje.", response.data)
+        self.assertIn(b"Enviando el mensaje a Resend por HTTPS.", response.data)
+        self.assertIn(b'"status": "accepted"', response.data)
+        self.assertIn(b'"type": "complete"', response.data)
+        https_connection.assert_called_once_with("api.resend.com", timeout=10)
+        connection.request.assert_called_once()
+        self.assertEqual(connection.request.call_args.args, ("POST", "/emails"))
+        request = connection.request.call_args.kwargs
+        self.assertEqual(request["headers"]["Authorization"], "Bearer test-api-key")
+        self.assertEqual(request["headers"]["Content-Type"], "application/json")
+        self.assertEqual(
+            json.loads(request["body"]),
+            {
+                "from": "website@example.com",
+                "to": ["person@example.com"],
+                "subject": "Prueba",
+                "text": "Contenido del correo",
+            },
+        )
 
     @patch("app.send_email")
     def test_progress_endpoint_reports_validation_errors(self, send_email):
@@ -97,8 +110,10 @@ class EmailFormTests(unittest.TestCase):
         self.assertIn("Hola, necesito información.", body)
         self.assertEqual(send_email.call_args.kwargs["reply_to"], "ana@example.com")
 
-    @patch("app.send_email")
-    def test_contact_form_reports_live_progress(self, send_email):
+    @patch("app.HTTPSConnection")
+    def test_contact_form_reports_live_progress(self, https_connection):
+        connection = https_connection.return_value
+        connection.getresponse.return_value.__enter__.return_value.status = 200
         response = self.client.post(
             "/send-form",
             data={
@@ -111,7 +126,55 @@ class EmailFormTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Proceso terminado.", response.data)
-        self.assertIn("on_progress", send_email.call_args.kwargs)
+        payload = json.loads(connection.request.call_args.kwargs["body"])
+        self.assertEqual(payload["from"], "website@example.com")
+        self.assertEqual(payload["to"], ["inbox@example.com"])
+        self.assertEqual(payload["reply_to"], "ana@example.com")
+        self.assertIn("Hola", payload["text"])
+
+    @patch("app.HTTPSConnection")
+    def test_resend_rejection_reports_stream_error(self, https_connection):
+        connection = https_connection.return_value
+        connection.getresponse.return_value.__enter__.return_value.status = 403
+        with self.assertLogs(self.app.logger, level="ERROR") as logs:
+            response = self.client.post(
+                "/send-email",
+                data={"recipient": "person@example.com", "subject": "Prueba", "body": "Texto"},
+                headers={"Accept": "text/event-stream"},
+                buffered=True,
+            )
+
+        self.assertIn(b'"type": "error"', response.data)
+        self.assertNotIn(b'"type": "complete"', response.data)
+        self.assertNotIn(b"test-api-key", response.data)
+        self.assertIn("HTTP 403", logs.output[0])
+
+    @patch("app.HTTPSConnection")
+    def test_resend_timeout_displays_error_after_redirect(self, https_connection):
+        https_connection.return_value.request.side_effect = TimeoutError()
+        with self.assertLogs(self.app.logger, level="ERROR") as logs:
+            response = self.client.post(
+                "/send-email",
+                data={"recipient": "person@example.com", "subject": "Prueba", "body": "Texto"},
+                follow_redirects=True,
+            )
+
+        self.assertIn(b"No se pudo enviar el correo.", response.data)
+        self.assertIn("TimeoutError", logs.output[0])
+
+    @patch("app.HTTPSConnection")
+    def test_missing_api_key_does_not_make_request(self, https_connection):
+        self.app.config["RESEND_API_KEY"] = ""
+        with self.assertLogs(self.app.logger, level="ERROR") as logs:
+            response = self.client.post(
+                "/send-email",
+                data={"recipient": "person@example.com", "subject": "Prueba", "body": "Texto"},
+                follow_redirects=True,
+            )
+
+        https_connection.assert_not_called()
+        self.assertIn(b"No se pudo enviar el correo.", response.data)
+        self.assertIn("RESEND_API_KEY", logs.output[0])
 
     @patch("app.send_email")
     def test_invalid_manual_email_is_rejected(self, send_email):
